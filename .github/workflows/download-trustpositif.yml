@@ -1,0 +1,133 @@
+name: Download TrustPositif Data
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install WireGuard and tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wireguard-tools curl jq gzip
+
+      - name: Setup VPN (Indonesia)
+        env:
+          WG_CONFIG: ${{ secrets.WIREGUARD_CONFIG }}
+        run: |
+          if [ -z "$WG_CONFIG" ]; then
+            echo "❌ ERROR: WIREGUARD_CONFIG secret not set!"
+            exit 1
+          fi
+          
+          echo "$WG_CONFIG" | sudo tee /etc/wireguard/wg0.conf > /dev/null
+          sudo chmod 600 /etc/wireguard/wg0.conf
+          sudo wg-quick up wg0
+          sleep 5
+          
+          VPN_IP=$(curl -s --max-time 10 ifconfig.me || echo "FAILED")
+          echo "📡 Current IP: $VPN_IP"
+          
+          if [ "$VPN_IP" != "FAILED" ]; then
+            COUNTRY=$(curl -s --max-time 10 "http://ip-api.com/json/$VPN_IP" | jq -r '.country // "Unknown"')
+            echo "📍 Country: $COUNTRY"
+          fi
+          
+          echo "✅ VPN connected!"
+
+      - name: Download and compress data
+        run: |
+          mkdir -p data
+          
+          echo "📥 Downloading domains..."
+          curl -L --max-time 30 --connect-timeout 10 -o data/domains \
+            https://trustpositif.komdigi.go.id/assets/db/domains || exit 1
+          
+          echo "📥 Downloading domains_isp..."
+          curl -L --max-time 30 --connect-timeout 10 -o data/domains_isp \
+            https://trustpositif.komdigi.go.id/assets/db/domains_isp || exit 1
+          
+          echo "📊 Original size:"
+          du -h data/domains data/domains_isp
+          
+          echo "🗜️ Compressing with gzip..."
+          gzip -9 data/domains
+          gzip -9 data/domains_isp
+          
+          echo "📊 Compressed size:"
+          du -h data/domains.gz data/domains_isp.gz
+          
+          cat > data/README.md << EOF
+# TrustPositif Data
+
+## Files
+- \`domains.gz\` - List of blocked domains (compressed)
+- \`domains_isp.gz\` - List of ISP-specific blocked domains (compressed)
+
+## How to use
+\`\`\`bash
+# Download and decompress
+curl -L -O https://raw.githubusercontent.com/SundaneseXploiter/BLOCKED/main/data/domains.gz
+gunzip domains.gz
+
+curl -L -O https://raw.githubusercontent.com/SundaneseXploiter/BLOCKED/main/data/domains_isp.gz
+gunzip domains_isp.gz
+\`\`\`
+
+## Statistics
+- Last updated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+EOF
+          
+          echo "✅ Compress complete!"
+
+      - name: Validate compressed files
+        run: |
+          for file in data/domains.gz data/domains_isp.gz; do
+            if [ ! -s "$file" ]; then
+              echo "❌ ERROR: $file is empty!"
+              exit 1
+            fi
+            if ! gunzip -t "$file"; then
+              echo "❌ ERROR: $file is corrupted!"
+              exit 1
+            fi
+          done
+          echo "✅ All files validated!"
+
+      - name: Auto commit and force push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/SundaneseXploiter/BLOCKED
+          
+          git add -f data/
+          
+          if git diff --staged --quiet; then
+            echo "ℹ️ No changes detected. Skipping commit."
+          else
+            echo "📝 Committing changes..."
+            git commit -m "🔄 Auto-update TrustPositif data - $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            git push --force origin main
+            echo "✅ Changes pushed successfully!"
+          fi
+
+      - name: Cleanup VPN
+        if: always()
+        run: |
+          sudo wg-quick down wg0 2>/dev/null || echo "VPN already disconnected"
