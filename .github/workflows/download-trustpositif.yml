@@ -17,7 +17,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install WireGuard and tools
         run: |
@@ -28,16 +27,21 @@ jobs:
         env:
           WG_CONFIG: ${{ secrets.WIREGUARD_CONFIG }}
         run: |
+          # Cek secret
           if [ -z "$WG_CONFIG" ]; then
             echo "❌ ERROR: WIREGUARD_CONFIG secret not set!"
             exit 1
           fi
           
+          # Setup WireGuard
           echo "$WG_CONFIG" | sudo tee /etc/wireguard/wg0.conf > /dev/null
           sudo chmod 600 /etc/wireguard/wg0.conf
+          
+          echo "🔄 Starting WireGuard VPN..."
           sudo wg-quick up wg0
           sleep 5
           
+          # Cek IP
           VPN_IP=$(curl -s --max-time 10 ifconfig.me || echo "FAILED")
           echo "📡 Current IP: $VPN_IP"
           
@@ -53,11 +57,11 @@ jobs:
           mkdir -p data
           
           echo "📥 Downloading domains..."
-          curl -L --max-time 30 --connect-timeout 10 -o data/domains \
+          curl -L --max-time 60 --connect-timeout 15 -o data/domains \
             https://trustpositif.komdigi.go.id/assets/db/domains || exit 1
           
           echo "📥 Downloading domains_isp..."
-          curl -L --max-time 30 --connect-timeout 10 -o data/domains_isp \
+          curl -L --max-time 60 --connect-timeout 15 -o data/domains_isp \
             https://trustpositif.komdigi.go.id/assets/db/domains_isp || exit 1
           
           echo "📊 Original size:"
@@ -69,29 +73,6 @@ jobs:
           
           echo "📊 Compressed size:"
           du -h data/domains.gz data/domains_isp.gz
-          
-          cat > data/README.md << EOF
-# TrustPositif Data
-
-## Files
-- \`domains.gz\` - List of blocked domains (compressed)
-- \`domains_isp.gz\` - List of ISP-specific blocked domains (compressed)
-
-## How to use
-\`\`\`bash
-# Download and decompress
-curl -L -O https://raw.githubusercontent.com/SundaneseXploiter/BLOCKED/main/data/domains.gz
-gunzip domains.gz
-
-curl -L -O https://raw.githubusercontent.com/SundaneseXploiter/BLOCKED/main/data/domains_isp.gz
-gunzip domains_isp.gz
-\`\`\`
-
-## Statistics
-- Last updated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-EOF
-          
-          echo "✅ Compress complete!"
 
       - name: Validate compressed files
         run: |
@@ -114,7 +95,7 @@ EOF
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           
-          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/SundaneseXploiter/BLOCKED
+          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/SundaneseExplorer/DIGI
           
           git add -f data/
           
