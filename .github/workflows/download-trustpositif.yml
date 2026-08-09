@@ -8,10 +8,10 @@ on:
 jobs:
   download:
     runs-on: ubuntu-latest
-    
+
     permissions:
       contents: write
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -32,45 +32,45 @@ jobs:
             echo "❌ ERROR: WIREGUARD_CONFIG secret not set!"
             exit 1
           fi
-          
+
           # Setup WireGuard
           echo "$WG_CONFIG" | sudo tee /etc/wireguard/wg0.conf > /dev/null
           sudo chmod 600 /etc/wireguard/wg0.conf
-          
+
           echo "🔄 Starting WireGuard VPN..."
           sudo wg-quick up wg0
           sleep 5
-          
+
           # Cek IP
           VPN_IP=$(curl -s --max-time 10 ifconfig.me || echo "FAILED")
           echo "📡 Current IP: $VPN_IP"
-          
+
           if [ "$VPN_IP" != "FAILED" ]; then
             COUNTRY=$(curl -s --max-time 10 "http://ip-api.com/json/$VPN_IP" | jq -r '.country // "Unknown"')
             echo "📍 Country: $COUNTRY"
           fi
-          
+
           echo "✅ VPN connected!"
 
       - name: Download and compress data
         run: |
           mkdir -p data
-          
+
           echo "📥 Downloading domains..."
           curl -L --max-time 60 --connect-timeout 15 -o data/domains \
             https://trustpositif.komdigi.go.id/assets/db/domains || exit 1
-          
+
           echo "📥 Downloading domains_isp..."
           curl -L --max-time 60 --connect-timeout 15 -o data/domains_isp \
             https://trustpositif.komdigi.go.id/assets/db/domains_isp || exit 1
-          
+
           echo "📊 Original size:"
           du -h data/domains data/domains_isp
-          
+
           echo "🗜️ Compressing with gzip..."
           gzip -9 data/domains
           gzip -9 data/domains_isp
-          
+
           echo "📊 Compressed size:"
           du -h data/domains.gz data/domains_isp.gz
 
@@ -89,26 +89,104 @@ jobs:
           echo "✅ All files validated!"
 
       - name: Auto commit and force push
+        id: push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          
+
           git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/SundaneseExplorer/DIGI
-          
+
           git add -f data/
-          
+
           if git diff --staged --quiet; then
             echo "ℹ️ No changes detected. Skipping commit."
+            echo "changed=false" >> $GITHUB_OUTPUT
           else
             echo "📝 Committing changes..."
-            git commit -m "🔄 Auto-update TrustPositif data - $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            COMMIT_MSG="🔄 Auto-update TrustPositif data - $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            git commit -m "$COMMIT_MSG"
             git push --force origin main
             echo "✅ Changes pushed successfully!"
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "commit_msg=$COMMIT_MSG" >> $GITHUB_OUTPUT
           fi
+
+      - name: Notify Telegram on success
+        if: steps.push.outputs.changed == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "⚠️ Telegram secrets not set, skipping notification."
+            exit 0
+          fi
+
+          DOMAINS_SIZE=$(du -h data/domains.gz | cut -f1)
+          ISP_SIZE=$(du -h data/domains_isp.gz | cut -f1)
+          RUN_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          REPO_URL="https://github.com/${{ github.repository }}"
+          RUN_URL="$REPO_URL/actions/runs/${{ github.run_id }}"
+
+          # Escape karakter markdown-breaking untuk Telegram (MarkdownV2): . ! - ( ) \
+          escape() {
+            printf '%s' "$1" | sed -e 's/[\\.!*(){}|]/\\&/g'
+          }
+
+          SAFE_RUN_TIME=$(escape "$RUN_TIME")
+
+          MESSAGE="✅ *TrustPositif Data Updated*
+          🕐 $SAFE_RUN_TIME
+          📦 \`domains.gz\`: $DOMAINS_SIZE
+          📦 \`domains_isp.gz\`: $ISP_SIZE
+          🔗 [Lihat commit]($REPO_URL/commits/main)
+          📊 [Lihat run]($RUN_URL)"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="$TELEGRAM_CHAT_ID" \
+            -d parse_mode="MarkdownV2" \
+            -d text="$MESSAGE" \
+            -d disable_web_page_preview="true" > /dev/null
+
+          echo "📨 Telegram notification sent!"
 
       - name: Cleanup VPN
         if: always()
         run: |
           sudo wg-quick down wg0 2>/dev/null || echo "VPN already disconnected"
+
+      - name: Notify Telegram on failure
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "⚠️ Telegram secrets not set, skipping notification."
+            exit 0
+          fi
+
+          RUN_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          REPO_URL="https://github.com/${{ github.repository }}"
+          RUN_URL="$REPO_URL/actions/runs/${{ github.run_id }}"
+
+          escape() {
+            printf '%s' "$1" | sed -e 's/[\\.!*(){}|]/\\&/g'
+          }
+
+          SAFE_RUN_TIME=$(escape "$RUN_TIME")
+
+          MESSAGE="❌ *TrustPositif Workflow FAILED*
+          🕐 $SAFE_RUN_TIME
+          🔗 [Lihat log]($RUN_URL)
+          💡 Cek step yang gagal di tab Actions\."
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="$TELEGRAM_CHAT_ID" \
+            -d parse_mode="MarkdownV2" \
+            -d text="$MESSAGE" \
+            -d disable_web_page_preview="true" > /dev/null
+
+          echo "📨 Telegram failure notification sent!"
