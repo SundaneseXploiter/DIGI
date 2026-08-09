@@ -126,7 +126,7 @@ jobs:
         run: |
           sudo wg-quick down wg0 2>/dev/null || echo "VPN already disconnected"
 
-  # JOB TERPISAH UNTUK NOTIFIKASI (jalan selalu, meskipun download gagal)
+  # JOB TERPISAH UNTUK NOTIFIKASI
   notify:
     runs-on: ubuntu-latest
     needs: [download]
@@ -161,15 +161,15 @@ jobs:
             
             if [ "$CHANGED" == "true" ]; then
               STATUS_ICON="✅"
-              STATUS_TEXT="**BERHASIL UPDATE!**"
+              STATUS_TEXT="BERHASIL UPDATE!"
             else
               STATUS_ICON="ℹ️"
-              STATUS_TEXT="**TIDAK ADA PERUBAHAN**"
+              STATUS_TEXT="TIDAK ADA PERUBAHAN"
             fi
             
             MESSAGE="${STATUS_ICON} *TrustPositif Data Update*
             
-${STATUS_TEXT}
+*${STATUS_TEXT}*
 
 📊 *Statistik:*
 • domains: \`${DOMAINS_LINES}\` lines (${DOMAINS_SIZE})
@@ -181,8 +181,6 @@ ${STATUS_TEXT}
             
           else
             MESSAGE="❌ *GAGAL UPDATE DATA!*
-
-${STATUS_TEXT}
 
 🕐 *Waktu:* ${TIMESTAMP}
 🔗 *Repository:* ${REPO_URL}
