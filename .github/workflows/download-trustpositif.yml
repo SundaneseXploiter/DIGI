@@ -96,10 +96,18 @@ jobs:
         run: |
           test -n "$TELEGRAM_BOT_TOKEN"
           test -n "$TELEGRAM_CHAT_ID"
+          DOMAINS_SIZE=$(du -h data/domains.gz | cut -f1)
+          DOMAINS_COUNT=$(gzip -cd data/domains.gz | wc -l | tr -d ' ')
+          ISP_SIZE=$(du -h data/domains_isp.gz | cut -f1)
+          ISP_COUNT=$(gzip -cd data/domains_isp.gz | wc -l | tr -d ' ')
+          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          MESSAGE=$(printf '✅ VALIDASI DATA BERHASIL\n━━━━━━━━━━━━━━━━━━\n📥 Download, kompresi, dan validasi selesai\n\n📦 domains.gz: %s (%s baris)\n📦 domains_isp.gz: %s (%s baris)\n\n📁 Repository: %s\n🌿 Branch: %s\n⚙️ Workflow: %s\n🎯 Pemicu: %s\n👤 Aktor: %s\n🕒 Waktu: %s\n🔢 Run: #%s (percobaan %s)\n\n🔗 %s' "$DOMAINS_SIZE" "$DOMAINS_COUNT" "$ISP_SIZE" "$ISP_COUNT" "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_WORKFLOW" "$GITHUB_EVENT_NAME" "$GITHUB_ACTOR" "$TIMESTAMP" "$GITHUB_RUN_NUMBER" "$GITHUB_RUN_ATTEMPT" "$RUN_URL")
           curl --fail --silent --show-error --retry 3 \
             --request POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=Data TrustPositif berhasil diunduh, dikompresi, dan divalidasi. Repository: ${GITHUB_REPOSITORY}. Run: ${GITHUB_RUN_ID}."
+            --data-urlencode "text=${MESSAGE}" \
+            --data-urlencode "disable_web_page_preview=true"
 
       - name: Auto commit and push
         id: auto_commit
@@ -129,10 +137,17 @@ jobs:
           test -n "$TELEGRAM_BOT_TOKEN"
           test -n "$TELEGRAM_CHAT_ID"
           COMMIT_SHA=$(git rev-parse --short HEAD)
+          COMMIT_MESSAGE=$(git log -1 --pretty=%s)
+          CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD | wc -l | tr -d ' ')
+          TOTAL_SIZE=$(du -ch data/domains.gz data/domains_isp.gz | tail -1 | cut -f1)
+          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          MESSAGE=$(printf '🚀 UPDATE REPOSITORY BERHASIL\n━━━━━━━━━━━━━━━━━━\n✅ Data terbaru berhasil di-commit dan di-push\n\n📁 Repository: %s\n🌿 Branch tujuan: main\n🔖 Commit: %s\n📝 Pesan: %s\n📄 File berubah: %s\n💾 Total ukuran data: %s\n\n⚙️ Workflow: %s\n🎯 Pemicu: %s\n👤 Aktor: %s\n🕒 Waktu: %s\n🔢 Run: #%s (percobaan %s)\n\n🔗 %s' "$GITHUB_REPOSITORY" "$COMMIT_SHA" "$COMMIT_MESSAGE" "$CHANGED_FILES" "$TOTAL_SIZE" "$GITHUB_WORKFLOW" "$GITHUB_EVENT_NAME" "$GITHUB_ACTOR" "$TIMESTAMP" "$GITHUB_RUN_NUMBER" "$GITHUB_RUN_ATTEMPT" "$RUN_URL")
           curl --fail --silent --show-error --retry 3 \
             --request POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=Data TrustPositif berhasil di-update dan di-push ke ${GITHUB_REPOSITORY}. Commit: ${COMMIT_SHA}. Run: ${GITHUB_RUN_ID}."
+            --data-urlencode "text=${MESSAGE}" \
+            --data-urlencode "disable_web_page_preview=true"
 
       - name: Cleanup VPN
         if: always()
