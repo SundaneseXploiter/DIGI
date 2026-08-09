@@ -8,10 +8,9 @@ on:
 jobs:
   download:
     runs-on: ubuntu-latest
-    
     permissions:
       contents: write
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -24,55 +23,55 @@ jobs:
           sudo apt-get install -y wireguard-tools curl jq gzip
 
       - name: Setup VPN (Indonesia)
+        id: vpn
         env:
           WG_CONFIG: ${{ secrets.WIREGUARD_CONFIG }}
         run: |
-          # Cek secret
           if [ -z "$WG_CONFIG" ]; then
             echo "❌ ERROR: WIREGUARD_CONFIG secret not set!"
             exit 1
           fi
-          
-          # Setup WireGuard
+
           echo "$WG_CONFIG" | sudo tee /etc/wireguard/wg0.conf > /dev/null
           sudo chmod 600 /etc/wireguard/wg0.conf
-          
-          echo "🔄 Starting WireGuard VPN..."
           sudo wg-quick up wg0
           sleep 5
-          
-          # Cek IP
+
           VPN_IP=$(curl -s --max-time 10 ifconfig.me || echo "FAILED")
           echo "📡 Current IP: $VPN_IP"
-          
+
           if [ "$VPN_IP" != "FAILED" ]; then
             COUNTRY=$(curl -s --max-time 10 "http://ip-api.com/json/$VPN_IP" | jq -r '.country // "Unknown"')
             echo "📍 Country: $COUNTRY"
           fi
-          
+
           echo "✅ VPN connected!"
 
       - name: Download and compress data
+        id: download
         run: |
           mkdir -p data
-          
+
           echo "📥 Downloading domains..."
           curl -L --max-time 60 --connect-timeout 15 -o data/domains \
             https://trustpositif.komdigi.go.id/assets/db/domains || exit 1
-          
+
           echo "📥 Downloading domains_isp..."
           curl -L --max-time 60 --connect-timeout 15 -o data/domains_isp \
             https://trustpositif.komdigi.go.id/assets/db/domains_isp || exit 1
-          
-          echo "📊 Original size:"
-          du -h data/domains data/domains_isp
-          
-          echo "🗜️ Compressing with gzip..."
+
           gzip -9 data/domains
           gzip -9 data/domains_isp
-          
-          echo "📊 Compressed size:"
-          du -h data/domains.gz data/domains_isp.gz
+
+          DOMAINS_LINES=$(gunzip -c data/domains.gz | wc -l)
+          ISP_LINES=$(gunzip -c data/domains_isp.gz | wc -l)
+          DOMAINS_SIZE=$(du -h data/domains.gz | cut -f1)
+          ISP_SIZE=$(du -h data/domains_isp.gz | cut -f1)
+
+          echo "DOMAINS_LINES=$DOMAINS_LINES" >> $GITHUB_OUTPUT
+          echo "ISP_LINES=$ISP_LINES" >> $GITHUB_OUTPUT
+          echo "DOMAINS_SIZE=$DOMAINS_SIZE" >> $GITHUB_OUTPUT
+          echo "ISP_SIZE=$ISP_SIZE" >> $GITHUB_OUTPUT
 
       - name: Validate compressed files
         run: |
@@ -89,24 +88,85 @@ jobs:
           echo "✅ All files validated!"
 
       - name: Auto commit and force push
+        id: commit
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          
+
           git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/SundaneseExplorer/DIGI
-          
+
           git add -f data/
-          
+
           if git diff --staged --quiet; then
             echo "ℹ️ No changes detected. Skipping commit."
+            echo "CHANGED=false" >> $GITHUB_OUTPUT
           else
             echo "📝 Committing changes..."
             git commit -m "🔄 Auto-update TrustPositif data - $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             git push --force origin main
             echo "✅ Changes pushed successfully!"
+            echo "CHANGED=true" >> $GITHUB_OUTPUT
           fi
+
+      - name: Send Telegram Notification
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          send_notification() {
+            local message="$1"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="${message}" \
+              -d parse_mode="Markdown"
+          }
+
+          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          REPO_URL="https://github.com/SundaneseExplorer/DIGI"
+          RUN_URL="${REPO_URL}/actions/runs/${{ github.run_id }}"
+
+          # Cek status job download
+          if [ "${{ job.status }}" == "success" ]; then
+            DOMAINS_LINES="${{ steps.download.outputs.DOMAINS_LINES }}"
+            ISP_LINES="${{ steps.download.outputs.ISP_LINES }}"
+            DOMAINS_SIZE="${{ steps.download.outputs.DOMAINS_SIZE }}"
+            ISP_SIZE="${{ steps.download.outputs.ISP_SIZE }}"
+            CHANGED="${{ steps.commit.outputs.CHANGED }}"
+
+            if [ "$CHANGED" == "true" ]; then
+              STATUS_ICON="✅"
+              STATUS_TEXT="BERHASIL UPDATE!"
+            else
+              STATUS_ICON="ℹ️"
+              STATUS_TEXT="TIDAK ADA PERUBAHAN"
+            fi
+
+            MESSAGE="${STATUS_ICON} *TrustPositif Data Update*
+
+*${STATUS_TEXT}*
+
+📊 *Statistik:*
+• domains: \`${DOMAINS_LINES}\` lines (${DOMAINS_SIZE})
+• domains_isp: \`${ISP_LINES}\` lines (${ISP_SIZE})
+
+🕐 *Waktu:* ${TIMESTAMP}
+🔗 *Repository:* [Lihat Data](${REPO_URL}/tree/main/data)
+📋 *Log:* [Lihat Log](${RUN_URL})"
+
+          else
+            MESSAGE="❌ *GAGAL UPDATE DATA!*
+
+🕐 *Waktu:* ${TIMESTAMP}
+🔗 *Repository:* ${REPO_URL}
+📋 *Log:* [Lihat Log](${RUN_URL})
+
+⚠️ *Cek log di atas untuk detail error.*"
+          fi
+
+          send_notification "$MESSAGE"
 
       - name: Cleanup VPN
         if: always()
