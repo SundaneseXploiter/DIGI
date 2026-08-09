@@ -68,8 +68,8 @@ jobs:
           du -h data/domains data/domains_isp
           
           echo "🗜️ Compressing with gzip..."
-          gzip -9 data/domains
-          gzip -9 data/domains_isp
+          gzip -n -9 -f data/domains
+          gzip -n -9 -f data/domains_isp
           
           echo "📊 Compressed size:"
           du -h data/domains.gz data/domains_isp.gz
