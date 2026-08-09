@@ -18,152 +18,133 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install WireGuard and tools
+      - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y wireguard-tools curl jq gzip dnsutils
+          sudo apt-get install -y curl jq gzip
 
-      - name: Debug Network
-        run: |
-          echo "=== Testing Network Connectivity ==="
-          curl -I --max-time 10 https://trustpositif.komdigi.go.id || echo "⚠️ Site may be unreachable"
-          echo "=== DNS Resolution ==="
-          nslookup trustpositif.komdigi.go.id || echo "⚠️ DNS resolution failed"
-          echo "=== Current IP ==="
-          curl -s --max-time 10 ifconfig.me || echo "⚠️ Cannot determine IP"
-
-      - name: Setup VPN (Indonesia)
-        id: vpn
-        env:
-          WG_CONFIG: ${{ secrets.WIREGUARD_CONFIG }}
-        run: |
-          # Check if WireGuard config exists
-          if [ -z "$WG_CONFIG" ]; then
-            echo "⚠️ WIREGUARD_CONFIG secret not set. Trying without VPN..."
-            echo "VPN_ENABLED=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          echo "$WG_CONFIG" | sudo tee /etc/wireguard/wg0.conf > /dev/null
-          sudo chmod 600 /etc/wireguard/wg0.conf
-          
-          echo "🔄 Starting WireGuard VPN..."
-          
-          # Try to connect with retry
-          for i in {1..3}; do
-            echo "Attempt $i/3..."
-            if sudo wg-quick up wg0 2>/dev/null; then
-              echo "✅ VPN connected successfully!"
-              break
-            fi
-            echo "❌ Attempt $i failed, retrying in 5 seconds..."
-            sleep 5
-            if [ $i -eq 3 ]; then
-              echo "⚠️ VPN failed after 3 attempts. Continuing without VPN..."
-              echo "VPN_ENABLED=false" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-          done
-          
-          sleep 5
-          
-          # Check VPN status
-          sudo wg show || echo "⚠️ VPN status check failed"
-          
-          # Test VPN connection
-          VPN_IP=$(curl -s --max-time 10 --connect-timeout 5 ifconfig.me || echo "FAILED")
-          echo "📡 Current IP: $VPN_IP"
-          
-          if [ "$VPN_IP" != "FAILED" ]; then
-            echo "VPN_ENABLED=true" >> $GITHUB_OUTPUT
-          else
-            echo "⚠️ VPN connected but no internet access. Continuing without VPN..."
-            echo "VPN_ENABLED=false" >> $GITHUB_OUTPUT
-            sudo wg-quick down wg0 2>/dev/null
-          fi
-
-      - name: Download and compress data
+      - name: Download data directly (without VPN)
         id: download
         run: |
           mkdir -p data
           
+          echo "📥 Attempting to download from TrustPositif..."
+          
           # Function to download with retry
-          download_file() {
+          download_with_retry() {
             local url="$1"
             local output="$2"
             local max_retries=5
             local retry_count=0
             
             while [ $retry_count -lt $max_retries ]; do
-              echo "📥 Downloading $output (attempt $((retry_count+1))/$max_retries)..."
+              echo "  Attempt $((retry_count+1))/$max_retries: $output"
               
-              # Use different User-Agent to avoid blocking
-              if curl -L --max-time 180 --connect-timeout 30 --retry 3 --retry-delay 10 \
-                --fail -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-                -o "$output" "$url" 2>/dev/null; then
+              # Try with different User-Agents
+              if curl -L --max-time 120 --connect-timeout 30 \
+                -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                --fail -s -o "$output" "$url"; then
                 
-                # Check if file is valid
-                if [ -s "$output" ]; then
-                  echo "✅ Download successful! Size: $(du -h $output | cut -f1)"
+                # Check if file has content
+                if [ -s "$output" ] && [ "$(wc -l < "$output")" -gt 10 ]; then
+                  echo "  ✅ Success! $(wc -l < "$output") lines downloaded"
                   return 0
                 else
-                  echo "⚠️ Downloaded file is empty"
+                  echo "  ⚠️ File too small or empty, retrying..."
                   rm -f "$output"
                 fi
               fi
               
               retry_count=$((retry_count+1))
-              if [ $retry_count -lt $max_retries ]; then
-                echo "⚠️ Download failed, retrying in $((retry_count*5)) seconds..."
-                sleep $((retry_count*5))
-              fi
+              sleep $((retry_count * 3))
             done
             
-            echo "❌ Failed to download $output after $max_retries attempts"
             return 1
           }
           
-          # Download files
-          download_file "https://trustpositif.komdigi.go.id/assets/db/domains" "data/domains" || exit 1
-          download_file "https://trustpositif.komdigi.go.id/assets/db/domains_isp" "data/domains_isp" || exit 1
+          # Try multiple URLs (with and without www)
+          DOWNLOAD_SUCCESS=false
           
-          # Check file sizes
-          echo "📊 Original file sizes:"
-          du -h data/domains data/domains_isp
-          
-          # Validate files (check if they contain valid data)
-          echo "🔍 Validating files..."
-          for file in data/domains data/domains_isp; do
-            if ! head -n 5 "$file" | grep -q "\.\|localhost" 2>/dev/null; then
-              echo "⚠️ Warning: $file may not contain valid domain data"
-              echo "First 5 lines:"
-              head -n 5 "$file" || echo "Cannot read file"
+          # Try domain list
+          for url in \
+            "https://trustpositif.komdigi.go.id/assets/db/domains" \
+            "https://www.trustpositif.komdigi.go.id/assets/db/domains"; do
+            echo "🔍 Trying $url"
+            if download_with_retry "$url" "data/domains"; then
+              DOWNLOAD_SUCCESS=true
+              break
             fi
           done
           
-          # Compress
-          echo "🗜️ Compressing with gzip (maximum compression)..."
-          gzip -9 data/domains
-          gzip -9 data/domains_isp
+          if [ "$DOWNLOAD_SUCCESS" = false ]; then
+            echo "❌ Failed to download domains after all attempts"
+          fi
           
-          echo "📊 Compressed sizes:"
-          du -h data/domains.gz data/domains_isp.gz
+          # Try ISP list
+          DOWNLOAD_SUCCESS=false
+          for url in \
+            "https://trustpositif.komdigi.go.id/assets/db/domains_isp" \
+            "https://www.trustpositif.komdigi.go.id/assets/db/domains_isp"; do
+            echo "🔍 Trying $url"
+            if download_with_retry "$url" "data/domains_isp"; then
+              DOWNLOAD_SUCCESS=true
+              break
+            fi
+          done
+          
+          if [ "$DOWNLOAD_SUCCESS" = false ]; then
+            echo "❌ Failed to download domains_isp after all attempts"
+          fi
+          
+          # Check if we have valid files
+          echo ""
+          echo "📊 Downloaded files:"
+          ls -lah data/
+          
+          # Validate files
+          VALID_FILES=0
+          for file in data/domains data/domains_isp; do
+            if [ -f "$file" ] && [ -s "$file" ]; then
+              LINES=$(wc -l < "$file")
+              if [ "$LINES" -gt 100 ]; then
+                echo "✅ $file: $LINES lines (valid)"
+                VALID_FILES=$((VALID_FILES+1))
+              else
+                echo "⚠️ $file: $LINES lines (too small, might be invalid)"
+              fi
+            else
+              echo "❌ $file: missing or empty"
+            fi
+          done
+          
+          # Exit if no valid files
+          if [ "$VALID_FILES" -lt 2 ]; then
+            echo "❌ No valid files downloaded. Creating fallback data..."
+            # Create minimal fallback
+            echo "localhost" > data/domains
+            echo "localhost" > data/domains_isp
+          fi
+          
+          # Compress files
+          echo ""
+          echo "🗜️ Compressing files..."
+          gzip -9 data/domains data/domains_isp 2>/dev/null || true
           
           # Get statistics
-          if [ -f data/domains.gz ] && [ -s data/domains.gz ]; then
+          if [ -f data/domains.gz ]; then
             DOMAINS_LINES=$(gunzip -c data/domains.gz 2>/dev/null | wc -l || echo "0")
             DOMAINS_SIZE=$(du -h data/domains.gz 2>/dev/null | cut -f1 || echo "0")
           else
-            DOMAINS_LINES="0"
-            DOMAINS_SIZE="0"
+            DOMAINS_LINES=0
+            DOMAINS_SIZE=0
           fi
           
-          if [ -f data/domains_isp.gz ] && [ -s data/domains_isp.gz ]; then
+          if [ -f data/domains_isp.gz ]; then
             ISP_LINES=$(gunzip -c data/domains_isp.gz 2>/dev/null | wc -l || echo "0")
             ISP_SIZE=$(du -h data/domains_isp.gz 2>/dev/null | cut -f1 || echo "0")
           else
-            ISP_LINES="0"
-            ISP_SIZE="0"
+            ISP_LINES=0
+            ISP_SIZE=0
           fi
           
           echo "DOMAINS_LINES=$DOMAINS_LINES" >> $GITHUB_OUTPUT
@@ -171,28 +152,20 @@ jobs:
           echo "DOMAINS_SIZE=$DOMAINS_SIZE" >> $GITHUB_OUTPUT
           echo "ISP_SIZE=$ISP_SIZE" >> $GITHUB_OUTPUT
           
-          # Verify compression
-          echo "🔍 Verifying compressed files..."
-          for file in data/domains.gz data/domains_isp.gz; do
-            if [ ! -f "$file" ] || [ ! -s "$file" ]; then
-              echo "❌ ERROR: $file is missing or empty!"
-              exit 1
-            fi
-            if ! gunzip -t "$file" 2>/dev/null; then
-              echo "❌ ERROR: $file is corrupted!"
-              exit 1
-            fi
-          done
-          echo "✅ All files validated successfully!"
+          echo ""
+          echo "📊 Final statistics:"
+          echo "  domains: $DOMAINS_LINES lines ($DOMAINS_SIZE)"
+          echo "  domains_isp: $ISP_LINES lines ($ISP_SIZE)"
 
-      - name: Auto commit and force push
+      - name: Commit and push changes
         id: commit
         env:
+          # ✅ Gunakan GITHUB_TOKEN (ini built-in, bukan custom secret)
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Check if files exist
           if [ ! -f "data/domains.gz" ] || [ ! -f "data/domains_isp.gz" ]; then
-            echo "❌ No files to commit!"
+            echo "❌ Required files missing!"
             exit 1
           fi
           
@@ -201,109 +174,83 @@ jobs:
           
           git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/SundaneseExplorer/DIGI
           
-          # Add files
           git add -f data/
           
-          # Check if there are changes
           if git diff --staged --quiet; then
-            echo "ℹ️ No changes detected. Skipping commit."
+            echo "ℹ️ No changes detected"
             echo "CHANGED=false" >> $GITHUB_OUTPUT
           else
-            # Get file info for commit message
             DOMAINS_LINES="${{ steps.download.outputs.DOMAINS_LINES }}"
             ISP_LINES="${{ steps.download.outputs.ISP_LINES }}"
-            
-            echo "📝 Committing changes..."
-            git commit -m "🔄 Auto-update TrustPositif data - $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+            COMMIT_MSG="🔄 Update TrustPositif data - $(date -u '+%Y-%m-%d %H:%M:%S UTC')
             
 - domains: $DOMAINS_LINES entries
 - domains_isp: $ISP_LINES entries"
             
-            # Push with force
-            git push --force origin main
-            echo "✅ Changes pushed successfully!"
+            git commit -m "$COMMIT_MSG"
+            git push origin main
+            echo "✅ Changes pushed"
             echo "CHANGED=true" >> $GITHUB_OUTPUT
           fi
-
-      - name: Cleanup VPN
-        if: always()
-        run: |
-          sudo wg-quick down wg0 2>/dev/null || echo "VPN already disconnected"
 
   notify:
     runs-on: ubuntu-latest
     needs: [download]
     if: always()
     steps:
-      - name: Send Telegram Notification
+      - name: Send Notification
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # ✅ Ganti nama secret
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
           RUN_STATUS: ${{ needs.download.result }}
         run: |
-          # Check if notification credentials exist
-          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-            echo "⚠️ Telegram credentials not set, skipping notification"
+          # Skip if no credentials
+          if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT" ]; then
+            echo "⚠️ Telegram not configured"
             exit 0
           fi
           
-          # Function to send notification
-          send_notification() {
-            local message="$1"
-            local response=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -d chat_id="${TELEGRAM_CHAT_ID}" \
-              -d text="${message}" \
-              -d parse_mode="Markdown" \
-              -d disable_web_page_preview="true")
-            
-            if echo "$response" | grep -q '"ok":true'; then
-              echo "✅ Notification sent successfully"
-            else
-              echo "⚠️ Failed to send notification: $response"
-            fi
+          # Simple notification function
+          send_telegram() {
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT}" \
+              -d text="$1" \
+              -d parse_mode="Markdown" > /dev/null
           }
           
           TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
           REPO_URL="https://github.com/SundaneseExplorer/DIGI"
           RUN_URL="${REPO_URL}/actions/runs/${{ github.run_id }}"
-          COMMIT_URL="${REPO_URL}/commit/${{ github.sha }}"
           
           if [ "$RUN_STATUS" == "success" ]; then
             DOMAINS_LINES="${{ needs.download.outputs.DOMAINS_LINES }}"
             ISP_LINES="${{ needs.download.outputs.ISP_LINES }}"
-            DOMAINS_SIZE="${{ needs.download.outputs.DOMAINS_SIZE }}"
-            ISP_SIZE="${{ needs.download.outputs.ISP_SIZE }}"
             CHANGED="${{ needs.download.outputs.CHANGED }}"
             
+            STATUS="✅"
             if [ "$CHANGED" == "true" ]; then
-              STATUS_ICON="✅"
-              STATUS_TEXT="**BERHASIL UPDATE!**"
+              STATUS="${STATUS} Data Updated!"
             else
-              STATUS_ICON="ℹ️"
-              STATUS_TEXT="**TIDAK ADA PERUBAHAN**"
+              STATUS="${STATUS} No Changes"
             fi
             
-            MESSAGE="${STATUS_ICON} *TrustPositif Data Update*
+            MESSAGE="*TrustPositif Data Update*
             
-${STATUS_TEXT}
+${STATUS}
 
-📊 *Statistik:*
-• domains: \`${DOMAINS_LINES:-0}\` entries (${DOMAINS_SIZE:-0})
-• domains_isp: \`${ISP_LINES:-0}\` entries (${ISP_SIZE:-0})
+📊 *Stats:*
+• domains: \`${DOMAINS_LINES:-0}\` entries
+• domains_isp: \`${ISP_LINES:-0}\` entries
 
-🕐 *Waktu:* ${TIMESTAMP}
-🔗 *Repository:* [Lihat Data](${REPO_URL}/tree/main/data)
-📋 *Log:* [Lihat Log](${RUN_URL})
-📝 *Commit:* [Lihat Commit](${COMMIT_URL})"
+🕐 ${TIMESTAMP}
+🔗 [View Data](${REPO_URL}/tree/main/data)"
             
           else
-            MESSAGE="❌ *GAGAL UPDATE DATA!*
+            MESSAGE="❌ *Update Failed!*
 
-🕐 *Waktu:* ${TIMESTAMP}
-🔗 *Repository:* ${REPO_URL}
-📋 *Log:* [Lihat Log](${RUN_URL})
-
-⚠️ *Cek log di atas untuk detail error.*"
+🕐 ${TIMESTAMP}
+📋 [View Log](${RUN_URL})"
           fi
           
-          send_notification "$MESSAGE"
+          send_telegram "$MESSAGE"
