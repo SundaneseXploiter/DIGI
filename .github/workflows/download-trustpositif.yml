@@ -18,157 +18,80 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install tools
+      - name: Install WireGuard and tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl jq gzip
+          sudo apt-get install -y wireguard-tools curl jq gzip
 
-      - name: Download data directly (without VPN)
-        id: download
-        run: |
-          mkdir -p data
-          
-          echo "📥 Attempting to download from TrustPositif..."
-          
-          # Function to download with retry
-          download_with_retry() {
-            local url="$1"
-            local output="$2"
-            local max_retries=5
-            local retry_count=0
-            
-            while [ $retry_count -lt $max_retries ]; do
-              echo "  Attempt $((retry_count+1))/$max_retries: $output"
-              
-              # Try with different User-Agents
-              if curl -L --max-time 120 --connect-timeout 30 \
-                -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-                --fail -s -o "$output" "$url"; then
-                
-                # Check if file has content
-                if [ -s "$output" ] && [ "$(wc -l < "$output")" -gt 10 ]; then
-                  echo "  ✅ Success! $(wc -l < "$output") lines downloaded"
-                  return 0
-                else
-                  echo "  ⚠️ File too small or empty, retrying..."
-                  rm -f "$output"
-                fi
-              fi
-              
-              retry_count=$((retry_count+1))
-              sleep $((retry_count * 3))
-            done
-            
-            return 1
-          }
-          
-          # Try multiple URLs (with and without www)
-          DOWNLOAD_SUCCESS=false
-          
-          # Try domain list
-          for url in \
-            "https://trustpositif.komdigi.go.id/assets/db/domains" \
-            "https://www.trustpositif.komdigi.go.id/assets/db/domains"; do
-            echo "🔍 Trying $url"
-            if download_with_retry "$url" "data/domains"; then
-              DOWNLOAD_SUCCESS=true
-              break
-            fi
-          done
-          
-          if [ "$DOWNLOAD_SUCCESS" = false ]; then
-            echo "❌ Failed to download domains after all attempts"
-          fi
-          
-          # Try ISP list
-          DOWNLOAD_SUCCESS=false
-          for url in \
-            "https://trustpositif.komdigi.go.id/assets/db/domains_isp" \
-            "https://www.trustpositif.komdigi.go.id/assets/db/domains_isp"; do
-            echo "🔍 Trying $url"
-            if download_with_retry "$url" "data/domains_isp"; then
-              DOWNLOAD_SUCCESS=true
-              break
-            fi
-          done
-          
-          if [ "$DOWNLOAD_SUCCESS" = false ]; then
-            echo "❌ Failed to download domains_isp after all attempts"
-          fi
-          
-          # Check if we have valid files
-          echo ""
-          echo "📊 Downloaded files:"
-          ls -lah data/
-          
-          # Validate files
-          VALID_FILES=0
-          for file in data/domains data/domains_isp; do
-            if [ -f "$file" ] && [ -s "$file" ]; then
-              LINES=$(wc -l < "$file")
-              if [ "$LINES" -gt 100 ]; then
-                echo "✅ $file: $LINES lines (valid)"
-                VALID_FILES=$((VALID_FILES+1))
-              else
-                echo "⚠️ $file: $LINES lines (too small, might be invalid)"
-              fi
-            else
-              echo "❌ $file: missing or empty"
-            fi
-          done
-          
-          # Exit if no valid files
-          if [ "$VALID_FILES" -lt 2 ]; then
-            echo "❌ No valid files downloaded. Creating fallback data..."
-            # Create minimal fallback
-            echo "localhost" > data/domains
-            echo "localhost" > data/domains_isp
-          fi
-          
-          # Compress files
-          echo ""
-          echo "🗜️ Compressing files..."
-          gzip -9 data/domains data/domains_isp 2>/dev/null || true
-          
-          # Get statistics
-          if [ -f data/domains.gz ]; then
-            DOMAINS_LINES=$(gunzip -c data/domains.gz 2>/dev/null | wc -l || echo "0")
-            DOMAINS_SIZE=$(du -h data/domains.gz 2>/dev/null | cut -f1 || echo "0")
-          else
-            DOMAINS_LINES=0
-            DOMAINS_SIZE=0
-          fi
-          
-          if [ -f data/domains_isp.gz ]; then
-            ISP_LINES=$(gunzip -c data/domains_isp.gz 2>/dev/null | wc -l || echo "0")
-            ISP_SIZE=$(du -h data/domains_isp.gz 2>/dev/null | cut -f1 || echo "0")
-          else
-            ISP_LINES=0
-            ISP_SIZE=0
-          fi
-          
-          echo "DOMAINS_LINES=$DOMAINS_LINES" >> $GITHUB_OUTPUT
-          echo "ISP_LINES=$ISP_LINES" >> $GITHUB_OUTPUT
-          echo "DOMAINS_SIZE=$DOMAINS_SIZE" >> $GITHUB_OUTPUT
-          echo "ISP_SIZE=$ISP_SIZE" >> $GITHUB_OUTPUT
-          
-          echo ""
-          echo "📊 Final statistics:"
-          echo "  domains: $DOMAINS_LINES lines ($DOMAINS_SIZE)"
-          echo "  domains_isp: $ISP_LINES lines ($ISP_SIZE)"
-
-      - name: Commit and push changes
-        id: commit
+      - name: Setup VPN (Indonesia)
         env:
-          # ✅ Gunakan GITHUB_TOKEN (ini built-in, bukan custom secret)
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WG_CONFIG: ${{ secrets.WIREGUARD_CONFIG }}
         run: |
-          # Check if files exist
-          if [ ! -f "data/domains.gz" ] || [ ! -f "data/domains_isp.gz" ]; then
-            echo "❌ Required files missing!"
+          # Cek secret
+          if [ -z "$WG_CONFIG" ]; then
+            echo "❌ ERROR: WIREGUARD_CONFIG secret not set!"
             exit 1
           fi
           
+          # Setup WireGuard
+          echo "$WG_CONFIG" | sudo tee /etc/wireguard/wg0.conf > /dev/null
+          sudo chmod 600 /etc/wireguard/wg0.conf
+          
+          echo "🔄 Starting WireGuard VPN..."
+          sudo wg-quick up wg0
+          sleep 5
+          
+          # Cek IP
+          VPN_IP=$(curl -s --max-time 10 ifconfig.me || echo "FAILED")
+          echo "📡 Current IP: $VPN_IP"
+          
+          if [ "$VPN_IP" != "FAILED" ]; then
+            COUNTRY=$(curl -s --max-time 10 "http://ip-api.com/json/$VPN_IP" | jq -r '.country // "Unknown"')
+            echo "📍 Country: $COUNTRY"
+          fi
+          
+          echo "✅ VPN connected!"
+
+      - name: Download and compress data
+        run: |
+          mkdir -p data
+          
+          echo "📥 Downloading domains..."
+          curl -L --max-time 60 --connect-timeout 15 -o data/domains \
+            https://trustpositif.komdigi.go.id/assets/db/domains || exit 1
+          
+          echo "📥 Downloading domains_isp..."
+          curl -L --max-time 60 --connect-timeout 15 -o data/domains_isp \
+            https://trustpositif.komdigi.go.id/assets/db/domains_isp || exit 1
+          
+          echo "📊 Original size:"
+          du -h data/domains data/domains_isp
+          
+          echo "🗜️ Compressing with gzip..."
+          gzip -9 data/domains
+          gzip -9 data/domains_isp
+          
+          echo "📊 Compressed size:"
+          du -h data/domains.gz data/domains_isp.gz
+
+      - name: Validate compressed files
+        run: |
+          for file in data/domains.gz data/domains_isp.gz; do
+            if [ ! -s "$file" ]; then
+              echo "❌ ERROR: $file is empty!"
+              exit 1
+            fi
+            if ! gunzip -t "$file"; then
+              echo "❌ ERROR: $file is corrupted!"
+              exit 1
+            fi
+          done
+          echo "✅ All files validated!"
+
+      - name: Auto commit and force push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           
@@ -177,80 +100,15 @@ jobs:
           git add -f data/
           
           if git diff --staged --quiet; then
-            echo "ℹ️ No changes detected"
-            echo "CHANGED=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ No changes detected. Skipping commit."
           else
-            DOMAINS_LINES="${{ steps.download.outputs.DOMAINS_LINES }}"
-            ISP_LINES="${{ steps.download.outputs.ISP_LINES }}"
-            COMMIT_MSG="🔄 Update TrustPositif data - $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-            
-- domains: $DOMAINS_LINES entries
-- domains_isp: $ISP_LINES entries"
-            
-            git commit -m "$COMMIT_MSG"
-            git push origin main
-            echo "✅ Changes pushed"
-            echo "CHANGED=true" >> $GITHUB_OUTPUT
+            echo "📝 Committing changes..."
+            git commit -m "🔄 Auto-update TrustPositif data - $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            git push --force origin main
+            echo "✅ Changes pushed successfully!"
           fi
 
-  notify:
-    runs-on: ubuntu-latest
-    needs: [download]
-    if: always()
-    steps:
-      - name: Send Notification
-        env:
-          # ✅ Ganti nama secret
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
-          RUN_STATUS: ${{ needs.download.result }}
+      - name: Cleanup VPN
+        if: always()
         run: |
-          # Skip if no credentials
-          if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT" ]; then
-            echo "⚠️ Telegram not configured"
-            exit 0
-          fi
-          
-          # Simple notification function
-          send_telegram() {
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
-              -d chat_id="${TELEGRAM_CHAT}" \
-              -d text="$1" \
-              -d parse_mode="Markdown" > /dev/null
-          }
-          
-          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          REPO_URL="https://github.com/SundaneseExplorer/DIGI"
-          RUN_URL="${REPO_URL}/actions/runs/${{ github.run_id }}"
-          
-          if [ "$RUN_STATUS" == "success" ]; then
-            DOMAINS_LINES="${{ needs.download.outputs.DOMAINS_LINES }}"
-            ISP_LINES="${{ needs.download.outputs.ISP_LINES }}"
-            CHANGED="${{ needs.download.outputs.CHANGED }}"
-            
-            STATUS="✅"
-            if [ "$CHANGED" == "true" ]; then
-              STATUS="${STATUS} Data Updated!"
-            else
-              STATUS="${STATUS} No Changes"
-            fi
-            
-            MESSAGE="*TrustPositif Data Update*
-            
-${STATUS}
-
-📊 *Stats:*
-• domains: \`${DOMAINS_LINES:-0}\` entries
-• domains_isp: \`${ISP_LINES:-0}\` entries
-
-🕐 ${TIMESTAMP}
-🔗 [View Data](${REPO_URL}/tree/main/data)"
-            
-          else
-            MESSAGE="❌ *Update Failed!*
-
-🕐 ${TIMESTAMP}
-📋 [View Log](${RUN_URL})"
-          fi
-          
-          send_telegram "$MESSAGE"
+          sudo wg-quick down wg0 2>/dev/null || echo "VPN already disconnected"
